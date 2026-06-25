@@ -15,6 +15,37 @@
 #include <vector>
 
 namespace feetech_ros2_driver {
+feetech_driver::Expected<JointCommandMode> FeetechHardwareInterface::get_joint_command_mode_(
+    const hardware_interface::ComponentInfo& joint) {
+  bool has_position_command = false;
+  bool has_velocity_command = false;
+
+  for (const auto& command_interface : joint.command_interfaces) {
+    if (command_interface.name == hardware_interface::HW_IF_POSITION) {
+      has_position_command = true;
+      continue;
+    }
+    if (command_interface.name == hardware_interface::HW_IF_VELOCITY) {
+      has_velocity_command = true;
+      continue;
+    }
+    return tl::make_unexpected(
+        fmt::format("Joint '{}' has unsupported command interface '{}'", joint.name, command_interface.name));
+  }
+
+  if (has_position_command && has_velocity_command) {
+    return tl::make_unexpected(
+        fmt::format("Joint '{}' cannot expose both position and velocity command interfaces", joint.name));
+  }
+  if (has_position_command) {
+    return JointCommandMode::kPosition;
+  }
+  if (has_velocity_command) {
+    return JointCommandMode::kVelocity;
+  }
+  return JointCommandMode::kNone;
+}
+
 #if HARDWARE_INTERFACE_VERSION_GTE(4, 34, 0)
 CallbackReturn FeetechHardwareInterface::on_init(const hardware_interface::HardwareComponentInterfaceParams& params) {
   if (hardware_interface::SystemInterface::on_init(params) != CallbackReturn::SUCCESS) {
@@ -108,6 +139,7 @@ CallbackReturn FeetechHardwareInterface::load_yaml_config_and_warn_(JointIdConfi
 
 CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMap& yaml_by_id) {
   joint_ids_.assign(info_.joints.size(), 0);
+  joint_command_modes_.assign(info_.joints.size(), JointCommandMode::kNone);
 
   for (size_t i = 0; i < info_.joints.size(); ++i) {
     const auto& joint = info_.joints[i];
@@ -121,6 +153,20 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
     }
     const int id = std::stoi(urdf_id_it->second);
     joint_ids_[i] = static_cast<uint8_t>(id);
+
+    const auto command_mode = get_joint_command_mode_(joint);
+    if (!command_mode) {
+      spdlog::error("FeetechHardwareInterface::configure_joints_ -> {}", command_mode.error());
+      return CallbackReturn::ERROR;
+    }
+    joint_command_modes_[i] = *command_mode;
+
+    spdlog::info("Configuring joint '{}' (id={}, mode={})",
+                 joint_name,
+                 id,
+                 joint_command_modes_[i] == JointCommandMode::kVelocity ? "velocity"
+                 : joint_command_modes_[i] == JointCommandMode::kPosition ? "position"
+                                                                          : "none");
 
     // Merge YAML config (looked up by servo id) over URDF params
     JointParams merged_params;
@@ -136,8 +182,31 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
 
     // Disable torque and unlock EPROM before writing parameters
     if (const auto result = communication_protocol_->disable_torque(joint_ids_[i]); !result) {
-      spdlog::error("FeetechHardwareInterface::configure_joints_ disable_torque -> {}", result.error());
+      spdlog::error("FeetechHardwareInterface::configure_joints_ disable_torque [{} id={}] -> {}",
+                    joint_name,
+                    id,
+                    result.error());
       return CallbackReturn::ERROR;
+    }
+
+    if (joint_command_modes_[i] == JointCommandMode::kPosition) {
+      if (const auto result = communication_protocol_->set_mode(joint_ids_[i], feetech_driver::OperationMode::kPosition);
+          !result) {
+        spdlog::error("FeetechHardwareInterface::configure_joints_ set_mode(position) [{} id={}] -> {}",
+                      joint_name,
+                      id,
+                      result.error());
+        return CallbackReturn::ERROR;
+      }
+    } else if (joint_command_modes_[i] == JointCommandMode::kVelocity) {
+      if (const auto result = communication_protocol_->set_mode(joint_ids_[i], feetech_driver::OperationMode::kSpeed);
+          !result) {
+        spdlog::error("FeetechHardwareInterface::configure_joints_ set_mode(speed) [{} id={}] -> {}",
+                      joint_name,
+                      id,
+                      result.error());
+        return CallbackReturn::ERROR;
+      }
     }
 
     // Single-byte parameters (0-255)
@@ -151,7 +220,11 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
         const auto result = communication_protocol_->write(
             joint_ids_[i], address, std::experimental::make_array(static_cast<uint8_t>(std::stoi(param_it->second))));
         if (!result) {
-          spdlog::error("FeetechHardwareInterface::configure_joints_ -> {}", result.error());
+          spdlog::error("FeetechHardwareInterface::configure_joints_ write-u8 [{} id={} param={}] -> {}",
+                        joint_name,
+                        id,
+                        parameter_name,
+                        result.error());
           return CallbackReturn::ERROR;
         }
       }
@@ -167,7 +240,11 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
         feetech_driver::to_sts(&buf[0], &buf[1], std::stoi(param_it->second));
         const auto result = communication_protocol_->write(joint_ids_[i], address, buf);
         if (!result) {
-          spdlog::error("FeetechHardwareInterface::configure_joints_ -> {}", result.error());
+          spdlog::error("FeetechHardwareInterface::configure_joints_ write-u16 [{} id={} param={}] -> {}",
+                        joint_name,
+                        id,
+                        parameter_name,
+                        result.error());
           return CallbackReturn::ERROR;
         }
       }
@@ -182,7 +259,11 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
         feetech_driver::to_sts(&buf[0], &buf[1], value);
         const auto result = communication_protocol_->write(joint_ids_[i], address, buf);
         if (!result) {
-          spdlog::error("FeetechHardwareInterface::configure_joints_ -> {}", result.error());
+          spdlog::error("FeetechHardwareInterface::configure_joints_ write-s16 [{} id={} param={}] -> {}",
+                        joint_name,
+                        id,
+                        parameter_name,
+                        result.error());
           return CallbackReturn::ERROR;
         }
       }
@@ -190,14 +271,20 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
 
     // Lock EPROM after writing parameters (for all joints)
     if (const auto result = communication_protocol_->lock_eprom(joint_ids_[i]); !result) {
-      spdlog::error("FeetechHardwareInterface::configure_joints_ lock_eprom -> {}", result.error());
+      spdlog::error("FeetechHardwareInterface::configure_joints_ lock_eprom [{} id={}] -> {}",
+                    joint_name,
+                    id,
+                    result.error());
       return CallbackReturn::ERROR;
     }
 
     // Only enable torque for joints with command interfaces (Follower Arm)
-    if (!joint.command_interfaces.empty()) {
+    if (joint_command_modes_[i] != JointCommandMode::kNone) {
       if (const auto result = communication_protocol_->set_torque(joint_ids_[i], true); !result) {
-        spdlog::error("FeetechHardwareInterface::configure_joints_ set_torque -> {}", result.error());
+        spdlog::error("FeetechHardwareInterface::configure_joints_ set_torque [{} id={}] -> {}",
+                      joint_name,
+                      id,
+                      result.error());
         return CallbackReturn::ERROR;
       }
     }
@@ -245,9 +332,14 @@ std::vector<hardware_interface::StateInterface> FeetechHardwareInterface::export
 std::vector<hardware_interface::CommandInterface> FeetechHardwareInterface::export_command_interfaces() {
   std::vector<hardware_interface::CommandInterface> command_interfaces;
   hw_positions_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
+  hw_velocities_.resize(info_.joints.size(), 0.0);
   for (uint i = 0; i < info_.joints.size(); i++) {
-    if (!info_.joints[i].command_interfaces.empty()) {
+    if (joint_command_modes_[i] == JointCommandMode::kPosition) {
       command_interfaces.emplace_back(info_.joints[i].name, hardware_interface::HW_IF_POSITION, &hw_positions_[i]);
+      continue;
+    }
+    if (joint_command_modes_[i] == JointCommandMode::kVelocity) {
+      command_interfaces.emplace_back(info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &hw_velocities_[i]);
     }
   }
 
@@ -268,8 +360,9 @@ hardware_interface::return_type FeetechHardwareInterface::read(const rclcpp::Tim
     state_hw_positions_[index] = feetech_driver::to_radians(
         feetech_driver::from_sts(feetech_driver::WordBytes{.low = readings[0], .high = readings[1]}) -
         feetech_driver::kStsMidpoint);
-    state_hw_velocities_[index] = feetech_driver::to_radians(
-        feetech_driver::from_sts(feetech_driver::WordBytes{.low = readings[2], .high = readings[3]}));
+    state_hw_velocities_[index] = feetech_driver::to_radians(feetech_driver::decode_sign_magnitude(
+        feetech_driver::from_sts(feetech_driver::WordBytes{.low = readings[2], .high = readings[3]}),
+        SMS_STS_SIGN_BIT_VELOCITY));
   });
   return hardware_interface::return_type::OK;
 }
@@ -281,14 +374,30 @@ hardware_interface::return_type FeetechHardwareInterface::write(const rclcpp::Ti
   std::vector<int> commanded_positions;
   std::vector<int> commanded_speeds;
   std::vector<int> commanded_accelerations;
+  std::vector<uint8_t> commanded_velocity_joint_ids;
+  std::vector<std::array<uint8_t, 2>> commanded_velocities;
 
   for (uint i = 0; i < info_.joints.size(); i++) {
-    // Only include joints with command interfaces
-    if (!info_.joints[i].command_interfaces.empty()) {
+    if (joint_command_modes_[i] == JointCommandMode::kPosition) {
       commanded_joint_ids.push_back(joint_ids_[i]);
       commanded_positions.push_back(feetech_driver::from_radians(hw_positions_[i]) + feetech_driver::kStsMidpoint);
       commanded_speeds.push_back(2400);       // Default speed
       commanded_accelerations.push_back(50);  // Default acceleration
+      continue;
+    }
+
+    if (joint_command_modes_[i] == JointCommandMode::kVelocity) {
+      try {
+        std::array<uint8_t, 2> velocity_buffer{};
+        const int encoded_velocity = feetech_driver::encode_sign_magnitude(
+            feetech_driver::from_radians(hw_velocities_[i]), SMS_STS_SIGN_BIT_VELOCITY);
+        feetech_driver::to_sts(&velocity_buffer[0], &velocity_buffer[1], encoded_velocity);
+        commanded_velocity_joint_ids.push_back(joint_ids_[i]);
+        commanded_velocities.push_back(velocity_buffer);
+      } catch (const std::exception& e) {
+        spdlog::error("FeetechHardwareInterface::write velocity encode [{}] -> {}", info_.joints[i].name, e.what());
+        return hardware_interface::return_type::ERROR;
+      }
     }
   }
 
@@ -302,14 +411,30 @@ hardware_interface::return_type FeetechHardwareInterface::write(const rclcpp::Ti
     }
   }
 
+  if (!commanded_velocity_joint_ids.empty()) {
+    const auto write_result =
+        communication_protocol_->sync_write(commanded_velocity_joint_ids, SMS_STS_GOAL_SPEED_L, commanded_velocities);
+    if (!write_result) {
+      spdlog::error("FeetechHardwareInterface::write velocity -> {}", write_result.error());
+      return hardware_interface::return_type::ERROR;
+    }
+  }
+
   return hardware_interface::return_type::OK;
 }
 
 CallbackReturn FeetechHardwareInterface::on_activate(const rclcpp_lifecycle::State& /* previous_state */) {
   // Time/Duration are not used
   read(rclcpp::Time{}, rclcpp::Duration::from_seconds(0));
-  // Set the initial command to current joint positions
-  hw_positions_ = state_hw_positions_;
+  for (size_t i = 0; i < info_.joints.size(); ++i) {
+    if (joint_command_modes_[i] == JointCommandMode::kPosition) {
+      hw_positions_[i] = state_hw_positions_[i];
+      continue;
+    }
+    if (joint_command_modes_[i] == JointCommandMode::kVelocity) {
+      hw_velocities_[i] = 0.0;
+    }
+  }
   return CallbackReturn::SUCCESS;
 }
 
