@@ -22,6 +22,11 @@ Make sure to look at [Memory table](https://docs.google.com/spreadsheets/d/1GVs7
 * `homing_offset` (optional): Signed offset written to the servo's EEPROM. The servo firmware applies `Present_Position = Actual_Position - Homing_Offset`, so setting `homing_offset = actual_position - 2048` makes the servo report 2048 (center) at your desired physical center. If migrating from the old `offset` parameter: `homing_offset = old_offset - 2048` (since the old offset was effectively the actual position at center).
 * `range_min` (optional): Minimum angle limit (raw ticks, after homing offset is applied).
 * `range_max` (optional): Maximum angle limit (raw ticks, after homing offset is applied).
+* `drive_mode` (optional): Direction flag for joints whose ROS-space direction is opposite to the raw tick direction.
+* `position_mapping` (optional): Controls how the driver converts between raw servo ticks and ROS joint position. Supported values:
+  * `servo_angle` (default): Legacy midpoint-based servo angle in radians.
+  * `gripper_jaw`: Uses calibrated `range_min`/`range_max` and maps into the ROS joint position range defined by `position_lower`/`position_upper`.
+* `position_lower` / `position_upper` (optional): ROS-space lower and upper bounds for `position_mapping=gripper_jaw`. These should match the modeled joint limits, for example the gripper jaw opening range in the URDF.
 * `max_torque_limit` (optional): Maximum torque limit.
 * `protection_current` (optional): Protection current threshold.
 * `overload_torque` (optional): Overload torque threshold.
@@ -39,6 +44,33 @@ Take a look at [ros2_so_arm100](https://github.com/JafarAbdi/ros2_so_arm100/blob
 As an alternative (or addition) to URDF `<param>` tags, joint parameters can be loaded from a YAML file. This is useful for calibration values that change between robots (like `homing_offset`) without modifying the URDF.
 
 The `id` parameter **must** be defined in the URDF (it is the hardware identity used to address the servo on the bus). YAML entries are matched to URDF joints by servo `id`, not by joint name — so the YAML joint name is just a human-friendly label. When both URDF params and YAML are provided for the same `id`, YAML values take precedence.
+
+When `range_min` and `range_max` are provided, the hardware interface can use them for ROS-space conversion:
+
+* Position joints with `position_mapping=servo_angle` keep the legacy midpoint-based radians conversion.
+* Position joints with `position_mapping=gripper_jaw` use `range_min`/`range_max` plus `position_lower`/`position_upper` to map between servo ticks and ROS joint position.
+* `drive_mode` flips the normalized direction before converting into the ROS joint range.
+* Position commands are converted back through the inverse mapping before they are sent to the servo.
+
+If `position_mapping=gripper_jaw` is used, `range_min`, `range_max`, `position_lower`, and `position_upper` must all be present and define increasing ranges.
+
+### Gripper Example
+
+Use the standard `position` interface and declare the gripper semantics explicitly:
+
+```xml
+<joint name="${prefix}gripper_joint">
+  <param name="id">6</param>
+  <param name="position_mapping">gripper_jaw</param>
+  <param name="position_lower">0.0</param>
+  <param name="position_upper">1.70</param>
+  <command_interface name="position" />
+  <state_interface name="position" />
+  <state_interface name="velocity" />
+</joint>
+```
+
+With that configuration, a ROS command of `0.0` means "fully closed" and `1.70` means "fully open" in the modeled jaw-angle space, while the driver converts that to the calibrated servo tick range internally.
 
 ### Format
 

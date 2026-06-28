@@ -1,6 +1,7 @@
 #include <fmt/ranges.h>
 
 #include <algorithm>
+#include <cmath>
 #include <feetech_driver/common.hpp>
 #include <feetech_driver/communication_protocol.hpp>
 #include <feetech_ros2_driver/feetech_ros2_driver.hpp>
@@ -15,6 +16,39 @@
 #include <vector>
 
 namespace feetech_ros2_driver {
+namespace {
+
+double to_position_from_ticks(const int raw_ticks, const JointMappingConfig& config) {
+  if (config.mapping == JointPositionMapping::kGripperJaw) {
+    const double span = static_cast<double>(config.range_max - config.range_min);
+    double normalized = (static_cast<double>(raw_ticks) - static_cast<double>(config.range_min)) / span;
+    normalized = std::clamp(normalized, 0.0, 1.0);
+    if (config.drive_mode) {
+      normalized = 1.0 - normalized;
+    }
+    return config.position_lower + normalized * (config.position_upper - config.position_lower);
+  }
+
+  return feetech_driver::to_radians(raw_ticks - feetech_driver::kStsMidpoint);
+}
+
+int to_ticks_from_position(const double position, const JointMappingConfig& config) {
+  if (config.mapping == JointPositionMapping::kGripperJaw) {
+    const double span = config.position_upper - config.position_lower;
+    double normalized = (position - config.position_lower) / span;
+    normalized = std::clamp(normalized, 0.0, 1.0);
+    if (config.drive_mode) {
+      normalized = 1.0 - normalized;
+    }
+    return static_cast<int>(std::lround(static_cast<double>(config.range_min) +
+                                        normalized * static_cast<double>(config.range_max - config.range_min)));
+  }
+
+  return feetech_driver::from_radians(position) + feetech_driver::kStsMidpoint;
+}
+
+}  // namespace
+
 feetech_driver::Expected<JointCommandMode> FeetechHardwareInterface::get_joint_command_mode_(
     const hardware_interface::ComponentInfo& joint) {
   bool has_position_command = false;
@@ -140,6 +174,7 @@ CallbackReturn FeetechHardwareInterface::load_yaml_config_and_warn_(JointIdConfi
 CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMap& yaml_by_id) {
   joint_ids_.assign(info_.joints.size(), 0);
   joint_command_modes_.assign(info_.joints.size(), JointCommandMode::kNone);
+  joint_mapping_configs_.assign(info_.joints.size(), JointMappingConfig{});
 
   for (size_t i = 0; i < info_.joints.size(); ++i) {
     const auto& joint = info_.joints[i];
@@ -179,6 +214,16 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
     if (merged_params.find("offset") != merged_params.end()) {
       spdlog::warn("Joint '{}': 'offset' param is deprecated and ignored — use 'homing_offset' instead", joint_name);
     }
+
+    const auto mapping_config = build_joint_mapping_config_(merged_params);
+    if (!mapping_config) {
+      spdlog::error("FeetechHardwareInterface::configure_joints_ mapping [{} id={}] -> {}",
+                    joint_name,
+                    id,
+                    mapping_config.error());
+      return CallbackReturn::ERROR;
+    }
+    joint_mapping_configs_[i] = *mapping_config;
 
     // Disable torque and unlock EPROM before writing parameters
     if (const auto result = communication_protocol_->disable_torque(joint_ids_[i]); !result) {
@@ -293,6 +338,54 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
   return CallbackReturn::SUCCESS;
 }
 
+feetech_driver::Expected<JointMappingConfig> FeetechHardwareInterface::build_joint_mapping_config_(
+    const JointParams& merged_params) const {
+  JointMappingConfig config;
+
+  if (const auto it = merged_params.find("position_mapping"); it != merged_params.end()) {
+    if (it->second == "servo_angle") {
+      config.mapping = JointPositionMapping::kServoAngle;
+    } else if (it->second == "gripper_jaw") {
+      config.mapping = JointPositionMapping::kGripperJaw;
+    } else {
+      return tl::make_unexpected(fmt::format("Unsupported position_mapping '{}'", it->second));
+    }
+  }
+
+  if (const auto it = merged_params.find("drive_mode"); it != merged_params.end()) {
+    config.drive_mode = std::stoi(it->second) != 0;
+  }
+
+  if (config.mapping == JointPositionMapping::kGripperJaw) {
+    const auto range_min_it = merged_params.find("range_min");
+    const auto range_max_it = merged_params.find("range_max");
+    const auto lower_it = merged_params.find("position_lower");
+    const auto upper_it = merged_params.find("position_upper");
+    if (range_min_it == merged_params.end() || range_max_it == merged_params.end()) {
+      return tl::make_unexpected("gripper_jaw mapping requires range_min and range_max");
+    }
+    if (lower_it == merged_params.end() || upper_it == merged_params.end()) {
+      return tl::make_unexpected("gripper_jaw mapping requires position_lower and position_upper");
+    }
+
+    config.range_min = std::stoi(range_min_it->second);
+    config.range_max = std::stoi(range_max_it->second);
+    config.position_lower = std::stod(lower_it->second);
+    config.position_upper = std::stod(upper_it->second);
+
+    if (config.range_max <= config.range_min) {
+      return tl::make_unexpected(
+          fmt::format("invalid tick range: [{}..{}]", config.range_min, config.range_max));
+    }
+    if (config.position_upper <= config.position_lower) {
+      return tl::make_unexpected(
+          fmt::format("invalid position range: [{}, {}]", config.position_lower, config.position_upper));
+    }
+  }
+
+  return config;
+}
+
 CallbackReturn FeetechHardwareInterface::validate_model_series_() {
   const auto joint_model_series = joint_ids_ | ranges::views::transform([&](const auto id) {
                                     return communication_protocol_->read_model_number(id)
@@ -357,9 +450,9 @@ hardware_interface::return_type FeetechHardwareInterface::read(const rclcpp::Tim
   }
   ranges::for_each(data | ranges::views::enumerate, [&](const auto& values) {
     const auto& [index, readings] = values;
-    state_hw_positions_[index] = feetech_driver::to_radians(
-        feetech_driver::from_sts(feetech_driver::WordBytes{.low = readings[0], .high = readings[1]}) -
-        feetech_driver::kStsMidpoint);
+    const int raw_position =
+        feetech_driver::from_sts(feetech_driver::WordBytes{.low = readings[0], .high = readings[1]});
+    state_hw_positions_[index] = to_position_from_ticks(raw_position, joint_mapping_configs_[index]);
     state_hw_velocities_[index] = feetech_driver::to_radians(feetech_driver::decode_sign_magnitude(
         feetech_driver::from_sts(feetech_driver::WordBytes{.low = readings[2], .high = readings[3]}),
         SMS_STS_SIGN_BIT_VELOCITY));
@@ -380,7 +473,7 @@ hardware_interface::return_type FeetechHardwareInterface::write(const rclcpp::Ti
   for (uint i = 0; i < info_.joints.size(); i++) {
     if (joint_command_modes_[i] == JointCommandMode::kPosition) {
       commanded_joint_ids.push_back(joint_ids_[i]);
-      commanded_positions.push_back(feetech_driver::from_radians(hw_positions_[i]) + feetech_driver::kStsMidpoint);
+      commanded_positions.push_back(to_ticks_from_position(hw_positions_[i], joint_mapping_configs_[i]));
       commanded_speeds.push_back(2400);       // Default speed
       commanded_accelerations.push_back(50);  // Default acceleration
       continue;
