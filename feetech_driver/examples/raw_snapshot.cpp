@@ -1,11 +1,11 @@
 #include <feetech_driver/SMS_STS.h>
-#include <feetech_driver/common.hpp>
-#include <feetech_driver/communication_protocol.hpp>
-#include <feetech_driver/serial_port.hpp>
 #include <fmt/format.h>
 
 #include <cstdint>
 #include <cstdlib>
+#include <feetech_driver/common.hpp>
+#include <feetech_driver/communication_protocol.hpp>
+#include <feetech_driver/serial_port.hpp>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -111,7 +111,9 @@ std::vector<Sample> collect_samples(CommunicationProtocol& protocol,
   return samples;
 }
 
-void write_present_block(std::ofstream& output, const std::vector<uint8_t>& ids, const std::vector<std::array<uint8_t, 4>>& data) {
+void write_present_block(std::ofstream& output,
+                         const std::vector<uint8_t>& ids,
+                         const std::vector<std::array<uint8_t, 4>>& data) {
   output << "    \"present\": {\n";
   for (std::size_t i = 0; i < ids.size(); ++i) {
     const int raw_position = from_sts(WordBytes{.low = data[i][0], .high = data[i][1]});
@@ -138,8 +140,7 @@ void write_present_block(std::ofstream& output, const std::vector<uint8_t>& ids,
 
 int main(int argc, char** argv) {
   if (argc != 4 && argc != 6) {
-    std::cerr << "Usage: " << argv[0]
-              << " <port> <comma-separated-ids> <output-json> [<duration-sec> <period-sec>]\n";
+    std::cerr << "Usage: " << argv[0] << " <port> <comma-separated-ids> <output-json> [<duration-sec> <period-sec>]\n";
     return EXIT_FAILURE;
   }
 

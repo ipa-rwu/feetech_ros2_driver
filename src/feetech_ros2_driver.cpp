@@ -199,7 +199,7 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
     spdlog::info("Configuring joint '{}' (id={}, mode={})",
                  joint_name,
                  id,
-                 joint_command_modes_[i] == JointCommandMode::kVelocity ? "velocity"
+                 joint_command_modes_[i] == JointCommandMode::kVelocity   ? "velocity"
                  : joint_command_modes_[i] == JointCommandMode::kPosition ? "position"
                                                                           : "none");
 
@@ -235,7 +235,8 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
     }
 
     if (joint_command_modes_[i] == JointCommandMode::kPosition) {
-      if (const auto result = communication_protocol_->set_mode(joint_ids_[i], feetech_driver::OperationMode::kPosition);
+      if (const auto result =
+              communication_protocol_->set_mode(joint_ids_[i], feetech_driver::OperationMode::kPosition);
           !result) {
         spdlog::error("FeetechHardwareInterface::configure_joints_ set_mode(position) [{} id={}] -> {}",
                       joint_name,
@@ -316,20 +317,16 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
 
     // Lock EPROM after writing parameters (for all joints)
     if (const auto result = communication_protocol_->lock_eprom(joint_ids_[i]); !result) {
-      spdlog::error("FeetechHardwareInterface::configure_joints_ lock_eprom [{} id={}] -> {}",
-                    joint_name,
-                    id,
-                    result.error());
+      spdlog::error(
+          "FeetechHardwareInterface::configure_joints_ lock_eprom [{} id={}] -> {}", joint_name, id, result.error());
       return CallbackReturn::ERROR;
     }
 
     // Only enable torque for joints with command interfaces (Follower Arm)
     if (joint_command_modes_[i] != JointCommandMode::kNone) {
       if (const auto result = communication_protocol_->set_torque(joint_ids_[i], true); !result) {
-        spdlog::error("FeetechHardwareInterface::configure_joints_ set_torque [{} id={}] -> {}",
-                      joint_name,
-                      id,
-                      result.error());
+        spdlog::error(
+            "FeetechHardwareInterface::configure_joints_ set_torque [{} id={}] -> {}", joint_name, id, result.error());
         return CallbackReturn::ERROR;
       }
     }
@@ -374,8 +371,7 @@ feetech_driver::Expected<JointMappingConfig> FeetechHardwareInterface::build_joi
     config.position_upper = std::stod(upper_it->second);
 
     if (config.range_max <= config.range_min) {
-      return tl::make_unexpected(
-          fmt::format("invalid tick range: [{}..{}]", config.range_min, config.range_max));
+      return tl::make_unexpected(fmt::format("invalid tick range: [{}..{}]", config.range_min, config.range_max));
     }
     if (config.position_upper <= config.position_lower) {
       return tl::make_unexpected(
