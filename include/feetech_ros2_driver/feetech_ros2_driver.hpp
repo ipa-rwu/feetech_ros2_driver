@@ -22,6 +22,12 @@ namespace feetech_ros2_driver {
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
+enum class JointCommandMode {
+  kNone,
+  kPosition,
+  kVelocity,
+};
+
 class FeetechHardwareInterface : public hardware_interface::SystemInterface {
  public:
 #if HARDWARE_INTERFACE_VERSION_GTE(4, 34, 0)
@@ -45,15 +51,18 @@ class FeetechHardwareInterface : public hardware_interface::SystemInterface {
   std::unique_ptr<feetech_driver::CommunicationProtocol> communication_protocol_;
 
   std::vector<double> hw_positions_;
+  std::vector<double> hw_velocities_;
   std::vector<double> state_hw_positions_;
   std::vector<double> state_hw_velocities_;
   std::vector<uint8_t> previous_hw_positions_;
 
   std::vector<uint8_t> joint_ids_;
+  std::vector<JointCommandMode> joint_command_modes_;
 
   CallbackReturn init_transport_();
   CallbackReturn load_yaml_config_and_warn_(JointIdConfigMap& out_yaml);
   CallbackReturn configure_joints_(const JointIdConfigMap& yaml_by_id);
   CallbackReturn validate_model_series_();
+  feetech_driver::Expected<JointCommandMode> get_joint_command_mode_(const hardware_interface::ComponentInfo& joint);
 };
 }  // namespace feetech_ros2_driver

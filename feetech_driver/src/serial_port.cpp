@@ -108,8 +108,14 @@ Result SerialPort::open() {
 }
 
 Result SerialPort::close() {
+  if (!port_.IsOpen()) {
+    return {};
+  }
+
   try {
     port_.Close();
+  } catch (const LibSerial::NotOpen& e) {
+    return tl::make_unexpected(fmt::format("close [{}]: {}", dev_.c_str(), e.what()));
   } catch (const LibSerial::AlreadyOpen& e) {
     return tl::make_unexpected(fmt::format("close [{}]: {}", dev_.c_str(), e.what()));
   } catch (const std::runtime_error& e) {
