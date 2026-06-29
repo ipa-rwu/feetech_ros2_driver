@@ -28,6 +28,20 @@ enum class JointCommandMode {
   kVelocity,
 };
 
+enum class JointPositionMapping {
+  kServoAngle,
+  kGripperJaw,
+};
+
+struct JointMappingConfig {
+  JointPositionMapping mapping{JointPositionMapping::kServoAngle};
+  bool drive_mode{false};
+  int range_min{0};
+  int range_max{0};
+  double position_lower{0.0};
+  double position_upper{0.0};
+};
+
 class FeetechHardwareInterface : public hardware_interface::SystemInterface {
  public:
 #if HARDWARE_INTERFACE_VERSION_GTE(4, 34, 0)
@@ -58,11 +72,13 @@ class FeetechHardwareInterface : public hardware_interface::SystemInterface {
 
   std::vector<uint8_t> joint_ids_;
   std::vector<JointCommandMode> joint_command_modes_;
+  std::vector<JointMappingConfig> joint_mapping_configs_;
 
   CallbackReturn init_transport_();
   CallbackReturn load_yaml_config_and_warn_(JointIdConfigMap& out_yaml);
   CallbackReturn configure_joints_(const JointIdConfigMap& yaml_by_id);
   CallbackReturn validate_model_series_();
   feetech_driver::Expected<JointCommandMode> get_joint_command_mode_(const hardware_interface::ComponentInfo& joint);
+  feetech_driver::Expected<JointMappingConfig> build_joint_mapping_config_(const JointParams& merged_params) const;
 };
 }  // namespace feetech_ros2_driver

@@ -81,6 +81,10 @@ add_executable(demo examples/demo.cpp)
 target_compile_features(demo PRIVATE cxx_std_20)
 target_link_libraries(demo serial_port communication_protocol)
 
+add_executable(raw_snapshot examples/raw_snapshot.cpp)
+target_compile_features(raw_snapshot PRIVATE cxx_std_20)
+target_link_libraries(raw_snapshot serial_port communication_protocol fmt::fmt)
+
 include(CMakePackageConfigHelpers)
 # Generate the version, config and target files into the build directory.
 write_basic_package_version_file(
@@ -101,7 +105,7 @@ install(
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME})
-install(TARGETS demo RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS demo raw_snapshot RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Use a namespace because CMake provides better diagnostics for namespaced
 # imported targets.
