@@ -54,6 +54,88 @@ When `range_min` and `range_max` are provided, the hardware interface can use th
 
 If `position_mapping=gripper_jaw` is used, `range_min`, `range_max`, `position_lower`, and `position_upper` must all be present and define increasing ranges.
 
+## How Joint State Is Calculated
+
+The driver always reads the servo registers directly, then converts them into ROS state interfaces.
+
+For every servo it reads:
+
+* `Present_Position`
+* `Present_Speed`
+
+The exact ROS mapping depends on the joint configuration.
+
+### Arm Position Joints
+
+Typical arm joints such as shoulder, elbow, wrist flex, and wrist roll use the default:
+
+* `position_mapping=servo_angle`
+* `command_interface=position`
+
+For these joints, the ROS state is computed as:
+
+* position state: `to_radians(raw_ticks - 2048)`
+* velocity state: `to_radians(decoded_speed_ticks)`
+
+Important details:
+
+* `homing_offset` is applied by the servo firmware before `Present_Position` is reported, so the driver sees the already-shifted raw tick value.
+* `range_min` and `range_max` are hardware limits for the servo, but they do not rescale the ROS joint state when `position_mapping=servo_angle` is used.
+* If RViz and the real mechanism disagree, first check the raw measurement path with `raw_snapshot`, then adjust `homing_offset`, `range_min`, `range_max`, or the URDF joint definition.
+
+### Gripper Jaw Joints
+
+Grippers can be modeled in jaw-opening space instead of raw servo-shaft angle by using:
+
+* `position_mapping=gripper_jaw`
+* `command_interface=position`
+* `position_lower`
+* `position_upper`
+* `range_min`
+* `range_max`
+
+For these joints, the driver first normalizes the raw servo ticks into the calibrated servo range:
+
+* `normalized = (raw_ticks - range_min) / (range_max - range_min)`
+* clamp `normalized` into `[0, 1]`
+* if `drive_mode != 0`, flip with `normalized = 1 - normalized`
+
+Then it maps that normalized value into the ROS gripper joint range:
+
+* `ros_position = position_lower + normalized * (position_upper - position_lower)`
+
+The inverse mapping is used for position commands before writing them back to the servo.
+
+This means:
+
+* ROS sees the modeled jaw opening angle or jaw-opening equivalent
+* ROS does not see the raw servo shaft angle for that joint
+* `0.0` and `position_upper` mean the calibrated closed/open ends of the configured gripper range, not necessarily `0` and `pi` of the servo itself
+
+### Wheel Joints
+
+Wheel joints typically use:
+
+* `command_interface=velocity`
+* `state_interface=position`
+* `state_interface=velocity`
+
+The command path is velocity-only:
+
+* ROS sends angular velocity commands in `rad/s`
+* the driver converts that command into the servo speed register format before writing it
+
+The state path is still direct servo feedback:
+
+* position state: `to_radians(raw_ticks - 2048)`
+* velocity state: `to_radians(decoded_speed_ticks)`
+
+So for wheel joints:
+
+* the reported `position` state is the current servo angle around its midpoint
+* it is not integrated travel distance or odometry
+* if you need mobile-base odometry, compute that at the controller / base layer, not from the raw hardware interface alone
+
 ### Gripper Example
 
 Use the standard `position` interface and declare the gripper semantics explicitly:
@@ -100,3 +182,75 @@ Pass the YAML file path as a hardware parameter:
 
 * URDF-only setup: [ros2_so_arm100](https://github.com/JafarAbdi/ros2_so_arm100/blob/main/so_arm100_description/control/so_arm100.ros2_control.xacro)
 * YAML config setup: [so101-ros-physical-ai](https://github.com/legalaspro/so101-ros-physical-ai) — see [follower](https://github.com/legalaspro/so101-ros-physical-ai/blob/main/so101_bringup/config/hardware/follower_joints.yaml) and [leader](https://github.com/legalaspro/so101-ros-physical-ai/blob/main/so101_bringup/config/hardware/leader_joints.yaml) arm configs.
+
+---
+
+## `raw_snapshot` utility
+
+The `feetech_driver` package also installs a small CLI utility named `raw_snapshot`. It reads the raw `Present_Position` / `Present_Speed` registers directly from one or more servos and writes the result to JSON.
+
+This is useful when:
+
+* you want to inspect the raw servo ticks without the ROS joint mapping layer
+* you are calibrating `homing_offset`, `range_min`, or `range_max`
+* you want to compare the driver's raw servo view against another stack such as LeRobot
+
+### Build/install location
+
+After building the workspace, the binary is typically available at:
+
+* `install/feetech_ros2_driver/bin/raw_snapshot`
+
+### Usage
+
+Single snapshot:
+
+```bash
+raw_snapshot <port> <comma-separated-ids> <output-json>
+```
+
+Example:
+
+```bash
+raw_snapshot /dev/ttyACM0 1,2,3,4,5,6 /tmp/arm_snapshot.json
+```
+
+Time series capture:
+
+```bash
+raw_snapshot <port> <comma-separated-ids> <output-json> <duration-sec> <period-sec>
+```
+
+Example:
+
+```bash
+raw_snapshot /dev/ttyACM0 1,2,3,4,5,6 /tmp/arm_series.json 2.0 0.05
+```
+
+This records samples for `2.0` seconds at approximately `0.05` second intervals.
+
+### Output format
+
+For a single snapshot, the JSON contains one `present` block per servo id:
+
+* `raw_position`: raw tick value reported by the servo
+* `centered_ticks`: `raw_position - 2048`
+* `radians_from_midpoint`: midpoint-based angle in radians
+* `raw_speed`: raw register value
+* `decoded_speed_ticks`: signed speed value decoded from the servo register format
+
+For a sampled capture, the JSON contains:
+
+* `duration_sec`
+* `period_sec`
+* `samples`
+
+Each element in `samples` contains:
+
+* `sample_index`
+* `monotonic_time`
+* `present`
+
+### Calibration note
+
+`raw_snapshot` is the right tool when you want the hardware truth before ROS-space conversion. In particular, when tuning `homing_offset` or servo tick limits, use `raw_position` as the source of truth and then derive the YAML / URDF calibration values from that measurement.
